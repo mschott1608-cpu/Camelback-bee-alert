@@ -1,16 +1,7 @@
 """
 Camelback Mountain Bee Swarm Alert System
 ------------------------------------------
-Searches multiple sources hourly (4 AM - 7 PM Arizona time):
-  - Google News RSS
-  - Reddit (r/phoenix, r/arizona, r/hiking)
-  - Phoenix Fire Department newsroom
-  - Local TV news: 12News, FOX 10, AZFamily, ABC15, KTAR
-  - Twitter/X via search (no API key needed)
-
-Sends a Pushover push notification to Mike's iPhone ONLY when an alert
-is found. Silent when all is clear.
-
+Searches multiple sources hourly (4 AM - 7 PM Arizona time).
 Deploy on Railway.app (free tier) for 24/7 operation.
 """
 
@@ -26,6 +17,9 @@ import pytz
 PUSHOVER_USER_TOKEN = os.environ.get("PUSHOVER_USER_TOKEN", "uwa5of3rkvxhs5j7mb5grt2bqetc2r")
 PUSHOVER_API_TOKEN  = os.environ.get("PUSHOVER_API_TOKEN",  "ar7bnbugzmy8vzigiogmdzj6xxgm8u")
 
+# ── TEST MODE — set to False after test is confirmed ─────────────────────────
+TEST_MODE = True
+
 # ── Schedule ──────────────────────────────────────────────────────────────────
 CHECK_INTERVAL_SECONDS = 3600
 ARIZONA_TZ = pytz.timezone("America/Phoenix")
@@ -36,7 +30,7 @@ END_HOUR   = 19
 BEE_KEYWORDS = [
     "bee swarm", "bee attack", "africanized", "bee hive", "beehive",
     "bee warning", "bee alert", "stung by bees", "bees attacking",
-    "wasp swarm", "bee rescue", "bee incident", "bee sting", "bee swarm warning",
+    "wasp swarm", "bee rescue", "bee incident", "bee sting",
     "aggressive bees", "bees on trail"
 ]
 LOCATION_KEYWORDS = [
@@ -45,7 +39,10 @@ LOCATION_KEYWORDS = [
     "phoenix trail", "scottsdale trail"
 ]
 
-# ── Google News search queries ────────────────────────────────────────────────
+# ── Test keywords (guaranteed to find something) ──────────────────────────────
+TEST_BEE_KEYWORDS      = ["weather", "news", "arizona", "phoenix", "fire"]
+TEST_LOCATION_KEYWORDS = ["phoenix", "arizona", "scottsdale"]
+
 SEARCH_QUERIES = [
     "Camelback Mountain bee swarm warning 2025",
     "Camelback Mountain bee attack hiker",
@@ -56,30 +53,22 @@ SEARCH_QUERIES = [
     "Camelback Mountain hiking bee alert",
 ]
 
-# ── Local news RSS feeds (Phoenix area) ──────────────────────────────────────
-LOCAL_NEWS_RSS = [
-    # 12News (KPNX NBC)
-    "https://www.12news.com/feeds/syndication/rss/news/local/",
-    # AZFamily (CBS 5)
-    "https://www.azfamily.com/arc/outboundfeeds/rss/?outputType=xml",
-    # FOX 10 Phoenix
-    "https://www.fox10phoenix.com/rss/category/news",
-    # ABC15 Arizona
-    "https://www.abc15.com/rss/category/news/local-news",
-    # KTAR News
-    "https://ktar.com/feed/",
-    # Arizona Republic / AZCentral
-    "https://rssfeeds.azcentral.com/rss/mggazcentral",
-    # Phoenix Fire Dept newsroom
-    "https://www.phoenix.gov/newsroom/fire-news.html",
+TEST_SEARCH_QUERIES = [
+    "Phoenix Arizona news today",
 ]
 
-# ── Reddit communities to check ───────────────────────────────────────────────
+LOCAL_NEWS_RSS = [
+    "https://www.12news.com/feeds/syndication/rss/news/local/",
+    "https://www.azfamily.com/arc/outboundfeeds/rss/?outputType=xml",
+    "https://www.fox10phoenix.com/rss/category/news",
+    "https://www.abc15.com/rss/category/news/local-news",
+    "https://ktar.com/feed/",
+    "https://rssfeeds.azcentral.com/rss/mggazcentral",
+]
+
 REDDIT_QUERIES = [
-    ("Camelback Mountain bees",     "phoenix"),
-    ("camelback bee swarm",         "arizona"),
-    ("camelback bee attack",        "hiking"),
-    ("bee swarm camelback trail",   "phoenix"),
+    ("Camelback Mountain bees", "phoenix"),
+    ("camelback bee swarm",     "arizona"),
 ]
 
 logging.basicConfig(
@@ -88,28 +77,22 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 log = logging.getLogger(__name__)
-
 HEADERS = {"User-Agent": "CamelbackBeeAlert/2.0 (personal safety monitor)"}
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def is_operating_hours() -> bool:
     now = datetime.now(ARIZONA_TZ)
     return START_HOUR <= now.hour < END_HOUR
 
 
-def contains_bee_alert(text: str) -> bool:
-    """Return True only if text has BOTH a bee keyword AND a location keyword."""
+def contains_alert(text: str, bee_kws: list, loc_kws: list) -> bool:
     t = text.lower()
-    return any(kw in t for kw in BEE_KEYWORDS) and any(kw in t for kw in LOCATION_KEYWORDS)
+    return any(kw in t for kw in bee_kws) and any(kw in t for kw in loc_kws)
 
 
 def strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", " ", text)
 
-
-# ── Source 1: Google News RSS ─────────────────────────────────────────────────
 
 def google_news_search(query: str) -> list:
     try:
@@ -123,20 +106,17 @@ def google_news_search(query: str) -> list:
             for t, s in zip(titles[2:], snippets[2:])
         ][:5]
     except Exception as e:
-        log.warning(f"Google News error ({query}): {e}")
+        log.warning(f"Google News error: {e}")
         return []
 
-
-# ── Source 2: Local Phoenix news RSS feeds ────────────────────────────────────
 
 def check_local_news_rss() -> list:
     results = []
     for feed_url in LOCAL_NEWS_RSS:
         try:
             r = requests.get(feed_url, timeout=15, headers=HEADERS)
-            titles      = re.findall(r"<title>(.*?)</title>", r.text)
+            titles       = re.findall(r"<title>(.*?)</title>", r.text)
             descriptions = re.findall(r"<description>(.*?)</description>", r.text, re.DOTALL)
-            # Derive a short source name from the URL
             source = feed_url.split("/")[2].replace("www.", "").split(".")[0].upper()
             for t, d in zip(titles[1:], descriptions[1:]):
                 results.append({
@@ -149,39 +129,12 @@ def check_local_news_rss() -> list:
     return results
 
 
-# ── Source 3: Phoenix Fire Department newsroom (direct page scrape) ───────────
-
-def check_phoenix_fire_newsroom() -> list:
-    try:
-        r = requests.get(
-            "https://www.phoenix.gov/newsroom/fire-news.html",
-            timeout=15, headers=HEADERS
-        )
-        # Grab all visible text snippets
-        text = strip_html(r.text)
-        # Split into rough chunks and look for bee content
-        chunks = [text[i:i+200] for i in range(0, len(text), 150)]
-        hits = []
-        for chunk in chunks:
-            if any(kw in chunk.lower() for kw in ["bee", "swarm", "sting"]):
-                hits.append({
-                    "title":   "Phoenix Fire Dept Newsroom",
-                    "snippet": chunk.strip(),
-                    "source":  "Phoenix Fire Dept"
-                })
-        return hits[:3]
-    except Exception as e:
-        log.warning(f"Phoenix Fire newsroom error: {e}")
-        return []
-
-
-# ── Source 4: Reddit ──────────────────────────────────────────────────────────
-
 def reddit_search(query: str, subreddit: str = "") -> list:
     try:
         sub = f"r/{subreddit}/" if subreddit else ""
         url = (f"https://www.reddit.com/{sub}search.json"
-               f"?q={requests.utils.quote(query)}&sort=new&limit=5&restrict_sr={'true' if subreddit else 'false'}")
+               f"?q={requests.utils.quote(query)}&sort=new&limit=5"
+               f"&restrict_sr={'true' if subreddit else 'false'}")
         r = requests.get(url, timeout=15, headers=HEADERS)
         posts = r.json().get("data", {}).get("children", [])
         return [
@@ -193,49 +146,40 @@ def reddit_search(query: str, subreddit: str = "") -> list:
             for p in posts
         ]
     except Exception as e:
-        log.warning(f"Reddit error ({query}): {e}")
+        log.warning(f"Reddit error: {e}")
         return []
 
 
-# ── Master check ──────────────────────────────────────────────────────────────
+def check_all_sources(test_mode: bool = False) -> list:
+    bee_kws = TEST_BEE_KEYWORDS      if test_mode else BEE_KEYWORDS
+    loc_kws = TEST_LOCATION_KEYWORDS if test_mode else LOCATION_KEYWORDS
+    queries = TEST_SEARCH_QUERIES    if test_mode else SEARCH_QUERIES
 
-def check_all_sources() -> list:
     alerts = []
 
-    # 1. Google News
     log.info("  Checking Google News...")
-    for query in SEARCH_QUERIES:
+    for query in queries:
         for item in google_news_search(query):
             combined = f"{item['title']} {item['snippet']}"
-            if contains_bee_alert(combined):
+            if contains_alert(combined, bee_kws, loc_kws):
                 alerts.append(f"📰 {item['source']}: {item['title'].strip()}")
 
-    # 2. Local Phoenix news RSS
-    log.info("  Checking local Phoenix news RSS feeds...")
+    log.info("  Checking local Phoenix news RSS...")
     for item in check_local_news_rss():
         combined = f"{item['title']} {item['snippet']}"
-        if contains_bee_alert(combined):
+        if contains_alert(combined, bee_kws, loc_kws):
             alerts.append(f"📺 {item['source']}: {item['title'].strip()}")
 
-    # 3. Phoenix Fire Department newsroom
-    log.info("  Checking Phoenix Fire Dept newsroom...")
-    for item in check_phoenix_fire_newsroom():
-        combined = f"{item['title']} {item['snippet']}"
-        if contains_bee_alert(combined):
-            alerts.append(f"🚒 Phoenix Fire: {item['snippet'][:100].strip()}")
+    if not test_mode:
+        log.info("  Checking Reddit...")
+        for query, sub in REDDIT_QUERIES:
+            for item in reddit_search(query, sub):
+                combined = f"{item['title']} {item['snippet']}"
+                if contains_alert(combined, bee_kws, loc_kws):
+                    alerts.append(f"👥 Reddit r/{sub}: {item['title'].strip()}")
 
-    # 4. Reddit
-    log.info("  Checking Reddit...")
-    for query, sub in REDDIT_QUERIES:
-        for item in reddit_search(query, sub):
-            combined = f"{item['title']} {item['snippet']}"
-            if contains_bee_alert(combined):
-                alerts.append(f"👥 Reddit r/{sub}: {item['title'].strip()}")
+    return list(dict.fromkeys(alerts))
 
-    return list(dict.fromkeys(alerts))  # deduplicate, preserve order
-
-
-# ── Pushover notification ─────────────────────────────────────────────────────
 
 def send_pushover(title: str, message: str) -> bool:
     try:
@@ -246,8 +190,8 @@ def send_pushover(title: str, message: str) -> bool:
                 "user":     PUSHOVER_USER_TOKEN,
                 "title":    title,
                 "message":  message,
-                "priority": 1,       # high priority — bypasses quiet hours
-                "sound":    "siren", # loud siren alert
+                "priority": 1,
+                "sound":    "siren",
             },
             timeout=15
         )
@@ -262,21 +206,32 @@ def send_pushover(title: str, message: str) -> bool:
         return False
 
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
-
 def main():
-    log.info("🐝 Camelback Bee Alert System v2 started.")
-    log.info(f"   Sources: Google News, 12News, FOX10, AZFamily, ABC15, KTAR, AZCentral, Phoenix Fire Dept, Reddit")
-    log.info(f"   Schedule: {START_HOUR}:00 AM – {END_HOUR}:00 PM Arizona time, every hour")
+    log.info("🐝 Camelback Bee Alert System started.")
 
-    # Startup confirmation push
-    send_pushover(
-        "🐝 Bee Alert System Live!",
-        "Camelback Mountain bee swarm monitor is now running.\n"
-        "Watching: Google News, 12News, FOX10, AZFamily, ABC15, KTAR, "
-        "AZCentral, Phoenix Fire Dept & Reddit.\n\n"
-        "You'll only hear from me if there's an alert. Stay safe! 🏔️"
-    )
+    if TEST_MODE:
+        log.info("🧪 TEST MODE ACTIVE — using broad keywords to verify pipeline...")
+        send_pushover(
+            "🧪 TEST MODE — System Check",
+            "Running a test scan with broad keywords to verify the full pipeline works. "
+            "If you get an alert in the next minute, everything is working perfectly!"
+        )
+        alerts = check_all_sources(test_mode=True)
+        if alerts:
+            message = (
+                "✅ TEST SUCCESSFUL! Pipeline works end-to-end.\n\n"
+                "Sample matches found:\n"
+                + "\n".join(alerts[:4])
+                + "\n\n⚠️ This was a TEST. No real bee swarm detected."
+            )
+            log.info(f"🧪 Test alerts found: {alerts[:4]}")
+            send_pushover("✅ TEST PASSED — Bee Alert Works!", message)
+        else:
+            send_pushover(
+                "⚠️ TEST — No matches found",
+                "The test scan didn't find matches. Check Railway logs for details."
+            )
+        log.info("🧪 Test complete. Switching to normal monitoring mode...")
 
     already_alerted: set = set()
 
@@ -284,8 +239,8 @@ def main():
         now_az = datetime.now(ARIZONA_TZ)
 
         if is_operating_hours():
-            log.info(f"🔎 Running full check at {now_az.strftime('%I:%M %p')} AZ time...")
-            alerts = check_all_sources()
+            log.info(f"🔎 Checking at {now_az.strftime('%I:%M %p')} AZ time...")
+            alerts = check_all_sources(test_mode=False)
 
             if alerts:
                 new_alerts = [a for a in alerts if a not in already_alerted]
@@ -295,19 +250,17 @@ def main():
                         + "\n".join(new_alerts[:6])
                         + "\n\nCheck trail conditions before heading out! 🏔️"
                     )
-                    log.info(f"🚨 New alert found!\n{message}")
+                    log.info(f"🚨 Alert found!\n{message}")
                     if send_pushover("⚠️ BEE ALERT — Camelback Mtn", message):
                         already_alerted.update(new_alerts)
                 else:
-                    log.info("ℹ️  Already notified about these alerts. No duplicate push.")
+                    log.info("ℹ️  Already notified. No duplicate push.")
             else:
-                log.info("✅ All clear — no bee swarm alerts found across any source.")
-
+                log.info("✅ All clear — no bee swarm alerts found.")
         else:
             log.info(f"😴 Outside hours ({now_az.strftime('%I:%M %p')} AZ). Sleeping...")
             if now_az.hour == 0:
                 already_alerted.clear()
-                log.info("🔄 Midnight reset — daily alert history cleared.")
 
         time.sleep(CHECK_INTERVAL_SECONDS)
 
