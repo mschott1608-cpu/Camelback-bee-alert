@@ -18,7 +18,7 @@ PUSHOVER_USER_TOKEN = os.environ.get("PUSHOVER_USER_TOKEN", "uwa5of3rkvxhs5j7mb5
 PUSHOVER_API_TOKEN  = os.environ.get("PUSHOVER_API_TOKEN",  "ar7bnbugzmy8vzigiogmdzj6xxgm8u")
 
 # ── TEST MODE — set to False after test is confirmed ─────────────────────────
-TEST_MODE = True
+TEST_MODE = False
 
 # ── Schedule ──────────────────────────────────────────────────────────────────
 CHECK_INTERVAL_SECONDS = 3600
